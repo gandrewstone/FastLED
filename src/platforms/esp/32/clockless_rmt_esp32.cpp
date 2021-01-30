@@ -36,11 +36,13 @@ static bool gInitialized = false;
 int ESP32RMTController::gMaxChannel;
 int ESP32RMTController::gMemBlocks;
 
+volatile uint64_t fastLEDlastFillDuration = 0;
+volatile uint64_t fastLEDfillDuration = 0;
+volatile uint32_t fastLEDnumFills = 0;
 
 ESP32RMTController::ESP32RMTController(int DATA_PIN, int T1, int T2, int T3, int maxChannel, int memBlocks)
-    : mPixelData(0), 
-      mSize(0), 
-      mCur(0), 
+    : mPixelData(0),
+      mSize(0),
       mWhichHalf(0),
       mBuffer(0),
       mBufferSize(0),
@@ -66,6 +68,11 @@ ESP32RMTController::ESP32RMTController(int DATA_PIN, int T1, int T2, int T3, int
     mZero.level1 = 0;
     mZero.duration1 = ESP_TO_RMT_CYCLES(T2+T3); // TO_RMT_CYCLES(T2 + T3);
 
+    mEmpty.level0 = 0;
+    mEmpty.level1 = 0;
+    mEmpty.duration0 = ESP_TO_RMT_CYCLES(C_NS(25000));
+    mEmpty.duration1 = ESP_TO_RMT_CYCLES(C_NS(25001));  // 50 uSec min to latch
+
     gControllers[gNumControllers] = this;
     gNumControllers++;
 
@@ -87,6 +94,7 @@ uint8_t * ESP32RMTController::getPixelBuffer(int size_in_bytes)
     if (mPixelData == 0) {
         mSize = size_in_bytes;
         mPixelData = (uint8_t *) malloc(mSize);
+        mEndPtr = mPixelData + size_in_bytes;
     }
     return mPixelData;
 }
@@ -131,7 +139,7 @@ void ESP32RMTController::init(gpio_num_t pin)
         gTX_sem = xSemaphoreCreateBinary();
         xSemaphoreGive(gTX_sem);
     }
-                
+
     if ( ! FASTLED_RMT_BUILTIN_DRIVER) {
         // -- Allocate the interrupt if we have not done so yet. This
         //    interrupt handler must work for all different kinds of
@@ -170,7 +178,7 @@ void IRAM_ATTR ESP32RMTController::showPixels()
         xSemaphoreTake(gTX_sem, portMAX_DELAY);
 
         // -- Make sure it's been at least 50us since last show
-        gWait.wait();
+        gWait.wait();  // If 50us wait is now in the RMT, remove this
 
         // -- First, fill all the available channels
         int channel = 0;
@@ -241,11 +249,12 @@ void IRAM_ATTR ESP32RMTController::startOnChannel(int channel)
         //    the pixel data and the RMT buffer
         mRMT_mem_start = & (RMTMEM.chan[mRMT_channel].data32[0].val);
         mRMT_mem_ptr = mRMT_mem_start;
+        mCurPtr = mPixelData;
         mCur = 0;
         mWhichHalf = 0;
         mLastFill = 0;
 
-        // -- Fill both halves of the RMT buffer (a totaly of 64 bits of pixel data)
+        // -- Fill both halves of the RMT buffer (a total of 64 bits of pixel data)
         fillNext(false);
         fillNext(false);
 
@@ -312,69 +321,68 @@ void IRAM_ATTR ESP32RMTController::doneOnChannel(rmt_channel_t channel, void * a
         }
     }
 }
-    
+
 // -- Custom interrupt handler
 //    This interrupt handler handles two cases: a controller is
 //    done writing its data, or a controller needs to fill the
 //    next half of the RMT buffer with data.
 void IRAM_ATTR ESP32RMTController::interruptHandler(void *arg)
 {
+    uint64_t start = __clock_cycles();
     // -- The basic structure of this code is borrowed from the
     //    interrupt handler in esp-idf/components/driver/rmt.c
     uint32_t intr_st = RMT.int_st.val;
     uint8_t channel;
 
-    bool stuff_to_do = false;
+    // bool stuff_to_do = false;
     for (channel = 0; channel < gMaxChannel; channel++) {
-        int tx_done_bit = channel * 3;
-        int tx_next_bit = channel + 24;
+        uint32_t tx_done_bit = BIT(channel * 3);
+        uint32_t tx_next_bit = BIT(channel + 24);
 
         ESP32RMTController * pController = gOnChannel[channel];
         if (pController != NULL) {
-            if (intr_st & BIT(tx_next_bit)) {
+            if (intr_st & tx_next_bit) {
                 // -- More to send on this channel
                 pController->fillNext(true);
-                RMT.int_clr.val |= BIT(tx_next_bit);
-            } else {
-                // -- Transmission is complete on this channel
-                if (intr_st & BIT(tx_done_bit)) {
-                    RMT.int_clr.val |= BIT(tx_done_bit);
-                    doneOnChannel(rmt_channel_t(channel), 0);
+                RMT.int_clr.val |= tx_next_bit;
                 }
-            }
+            //else {
+                // -- Transmission is complete on this channel
+                if (intr_st & tx_done_bit) {
+                    // GAS:
+                    //gpio_set_level(pController->mPin,0);
+                    // GPIO_FUNC0_OUT_INV_SEL &= (1 << pController->mPin); // make sure output is not inverted
+                    //gpio_set_direction(pController->mPin, gpio_mode_t::GPIO_MODE_OUTPUT);
+                    //gpio_set_level(pController->mPin,0);
+                    //gpio_matrix_out(pController->mPin, 0x100 , 0,0); // SIG_GPIO_OUT_IDX
+                    //gpio_matrix_out(pController->mPin, GPIO_SD0_OUT_IDX, 0,0);
+                    RMT.int_clr.val &= ~tx_next_bit;
+                    RMT.int_clr.val |= tx_done_bit;
+                    doneOnChannel(rmt_channel_t(channel), 0);
+                    }
+                //}
         }
     }
+
+    uint64_t end = __clock_cycles();
+    if (end > start)  // ignore any wrap-around samples
+        {
+    fastLEDfillDuration += end - start;
+    fastLEDlastFillDuration = end;
+    fastLEDnumFills++;
+        }
 }
 
 // -- Fill RMT buffer
 //    Puts 32 bits of pixel data into the next 32 slots in the RMT memory
 //    Each data bit is represented by a 32-bit RMT item that specifies how
 //    long to hold the signal high, followed by how long to hold it low.
+
+#if 0
 void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
 {
-    uint32_t now = __clock_cycles();
-    if (check_time) {
-        if (mLastFill != 0 and now > mLastFill) {
-            uint32_t delta = (now - mLastFill);
-            if (delta > mMaxCyclesPerFill) {
-                // Serial.print(delta);
-                // Serial.print(" BAIL ");
-                // Serial.println(mCur);
-                // rmt_tx_stop(mRMT_channel);
-                // Inline the code for rmt_tx_stop, so it can be placed in IRAM
-                /** -- Go back to the original strategy of just setting mCur = mSize
-                       and letting the regular 'stop' process happen
-                * mRMT_mem_start = 0;
-                RMT.int_ena.val &= ~(1 << (mRMT_channel * 3));
-                RMT.conf_ch[mRMT_channel].conf1.tx_start = 0;
-                RMT.conf_ch[mRMT_channel].conf1.mem_rd_rst = 1;
-                RMT.conf_ch[mRMT_channel].conf1.mem_rd_rst = 0;
-                */
-                mCur = mSize;
-            }
-        }
-    }
-    mLastFill = now;
+    uint64_t start = __clock_cycles();
+    mLastFill = start;
 
     // -- Get the zero and one values into local variables
     register uint32_t one_val = mOne.val;
@@ -389,8 +397,8 @@ void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
             // -- Get the next four bytes of pixel data
             register uint32_t pixeldata = mPixelData[mCur] << 24;
             mCur++;
-            
-            // Shift bits out, MSB first, setting RMTMEM.chan[n].data32[x] to the 
+
+            // Shift bits out, MSB first, setting RMTMEM.chan[n].data32[x] to the
             // rmt_item32_t value corresponding to the buffered bit value
             for (register uint32_t j = 0; j < 8; j++) {
                 *pItem++ = (pixeldata & 0x80000000L) ? one_val : zero_val;
@@ -414,7 +422,273 @@ void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
 
     // -- Store the new pointer back into the object
     mRMT_mem_ptr = pItem;
+
+    /*
+    uint64_t end = __clock_cycles();
+    if (end > start)  // ignore any wrap-around samples
+    {
+    fastLEDfillDuration += end - start;
+    fastLEDlastFill = end;
+    fastLEDnumFills++;
+    }
+    */
 }
+
+#else
+void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
+{
+    // uint64_t start = xthal_get_ccount();  // __clock_cycles();
+
+    // -- Get the zero and one values into local variables
+    register uint32_t one_val = mOne.val;
+    register uint32_t zero_val = mZero.val;
+
+    // -- Use locals for speed
+    volatile register uint32_t * pItem =  mRMT_mem_ptr;
+
+    register unsigned char* end = mCurPtr + PULSES_PER_FILL/8;
+    if (end > mEndPtr) end = mEndPtr;
+
+    while(mCurPtr < end)
+    {
+            // -- Get the next four bytes of pixel data
+            register uint32_t pixeldata4 = *((uint32_t*) mCurPtr);
+            mCurPtr+=4;
+/*
+            asm("movi a3, 1\n"                // Mask bit
+                "slli a4, a3, 31\n"           // Shift it to the top
+                "and a2, %3, a4\n"            // mask top bit of pixeldata4
+                "moveqz a1, %0, a2\n"         // if its zero load the zero_val into a1
+                "movnez a1, %1, a2\n"         // if its 1 load the one_val into a1
+                "s32i   a1, %2, 0\n"          // store a1 contents into *(pItem+0)
+                    :
+                    : "r" (zero_val), "r" (one_val), "r" (pItem), "r" (pixeldata4)
+                : "a1","a2","a3","a4");
+*/
+            for (register int j=0;j<4;j++)
+            {
+                // Seem backwards?  ESP32 is little endian.
+                register uint32_t pixeldata = pixeldata4 & 255;
+                pixeldata4 >>= 8;
+
+            switch(pixeldata>>4)
+            {
+            default:
+            case 0:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 1:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 2:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 3:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 4:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 5:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 6:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 7:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 8:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 9:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 10:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 11:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 12:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 13:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 14:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 15:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            }
+
+            switch(pixeldata&0xf)
+            //switch(pixeldata&0xe)
+            {
+            default:
+            case 0:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 1:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 2:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 3:
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 4:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 5:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 6:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 7:
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 8:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 9:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 10:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 11:
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            case 12:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = zero_val;
+                break;
+            case 13:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                *pItem++ = one_val;
+                break;
+            case 14:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = zero_val;
+                break;
+            case 15:
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                *pItem++ = one_val;
+                break;
+            }
+            }
+    }
+    if (end == mEndPtr) *pItem++ = 0;
+
+    // -- Flip to the other half, resetting the pointer if necessary
+    mWhichHalf++;
+    if (mWhichHalf == 2)
+    {
+        pItem = mRMT_mem_start;
+        mWhichHalf = 0;
+    }
+
+    // -- Store the new pointer back into the object
+    mRMT_mem_ptr = pItem;
+}
+#endif
 
 // -- Init pulse buffer
 //    Set up the buffer that will hold all of the pulse items for this

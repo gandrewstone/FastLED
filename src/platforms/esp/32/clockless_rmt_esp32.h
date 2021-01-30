@@ -173,6 +173,7 @@ __attribute__ ((always_inline)) inline static uint32_t __clock_cycles() {
 #define NS_TO_CYCLES(n)             ( (n) / NS_PER_CYCLE )
 #define RMT_RESET_DURATION          NS_TO_CYCLES(50000)
 
+
 // -- Core or custom driver
 #ifndef FASTLED_RMT_BUILTIN_DRIVER
 #define FASTLED_RMT_BUILTIN_DRIVER false
@@ -201,6 +202,7 @@ private:
     // -- Timing values for zero and one bits, derived from T1, T2, and T3
     rmt_item32_t   mZero;
     rmt_item32_t   mOne;
+    rmt_item32_t   mEmpty;  // Drive the line low for the full duration
 
     // -- Total expected time to send 32 bits
     //    Each strip should get an interrupt roughly at this interval
@@ -212,6 +214,8 @@ private:
     uint8_t *      mPixelData;
     int            mSize;
     int            mCur;
+    uint8_t *      mCurPtr;
+    uint8_t *      mEndPtr;
 
     // -- RMT memory
     volatile uint32_t * mRMT_mem_ptr;
