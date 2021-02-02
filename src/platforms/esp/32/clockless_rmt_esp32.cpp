@@ -36,10 +36,6 @@ static bool gInitialized = false;
 int ESP32RMTController::gMaxChannel;
 int ESP32RMTController::gMemBlocks;
 
-volatile uint64_t fastLEDlastFillDuration = 0;
-volatile uint64_t fastLEDfillDuration = 0;
-volatile uint32_t fastLEDnumFills = 0;
-
 ESP32RMTController::ESP32RMTController(int DATA_PIN, int T1, int T2, int T3, int maxChannel, int memBlocks)
     : mPixelData(0),
       mSize(0),
@@ -280,7 +276,7 @@ void IRAM_ATTR ESP32RMTController::tx_start()
     mLastFill = __clock_cycles();
 }
 
-// -- A controller is done 
+// -- A controller is done
 //    This function is called when a controller finishes writing
 //    its data. It is called either by the custom interrupt
 //    handler (below), or as a callback from the built-in
@@ -324,7 +320,6 @@ void IRAM_ATTR ESP32RMTController::doneOnChannel(rmt_channel_t channel, void * a
 //    next half of the RMT buffer with data.
 void IRAM_ATTR ESP32RMTController::interruptHandler(void *arg)
 {
-    uint64_t start = __clock_cycles();
     // -- The basic structure of this code is borrowed from the
     //    interrupt handler in esp-idf/components/driver/rmt.c
     register uint32_t intr_st = RMT.int_st.val;
@@ -356,167 +351,178 @@ void IRAM_ATTR ESP32RMTController::interruptHandler(void *arg)
                         // -- Get the next four bytes of pixel data
                         register uint32_t pixeldata4 = *((uint32_t*) curPtr);
                         curPtr+=4;
+                        // This assembly code writes the RMT pattern for all 32 bits of pixeldata4 into the RMT buffer.
+                        // It achieves a jump-free 4 cycles per bit by operating as follows:
+                        // First it shifts the target bit into the MSB (not necessary for the first bit) of reg %3
+                        // Then it executes 2 speculative move operations that copy the correct RMT pattern into a
+                        // working register, based on the sign of %3.  Since we shifted the target bit into MSB, that
+                        // bit defines the sign.
+                        // Finally we store the working register to memory, indexed by pItem with a specified offset.
+                        // If the ESP32 was big endian, the offset would simply be incrementing, 0,4,8... However,
+                        // the ESP32 is little endian, which means the bytes are backwards, but the bits within the
+                        // bytes are forwards!
                         asm(
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 96\n"          // store a1 contents into *(pItem+0)
+                            "movgez a11, %0, %3\n"    // if the high bit is zero load the zero_val into reg
+                            "movltz a11, %1, %3\n"    // if its 1 load one_val instead
+                            "s32i   a11, %2, 96\n"    // store a11 into *(pItem+offset).  Offset is wierd because little endian
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 100\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"      // Shift next bit into bit 31 (sign bit)
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 100\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 104\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 104\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 108\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 108\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 112\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 112\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 116\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 116\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 120\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 120\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 124\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 124\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 64\n"          // store a1 contents into *(pItem+0)
+                            // second byte
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 64\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 68\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 68\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 72\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 72\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 76\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 76\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 80\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 80\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 84\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 84\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 88\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 88\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 92\n"          // store a1 contents into *(pItem+0)
-                
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 92\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 32\n"          // store a1 contents into *(pItem+0)
+                            // third byte
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 32\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 36\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 36\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 40\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 40\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 44\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 44\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 48\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 48\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 52\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 52\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 56\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 56\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 60\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 60\n"
 
-                            
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 0\n"          // store a1 contents into *(pItem+0)
+                            // last byte
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 0\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 4\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 4\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 8\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 8\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 12\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 12\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 16\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 16\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 20\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 20\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 24\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 24\n"
 
-                            "slli   %3, %3, 1\n"           // Shift it to the top
-                            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-                            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-                            "s32i   a11, %2, 28\n"          // store a1 contents into *(pItem+0)
+                            "slli   %3, %3, 1\n"
+                            "movgez a11, %0, %3\n"
+                            "movltz a11, %1, %3\n"
+                            "s32i   a11, %2, 28\n"
                             :
                             : "r" (zero_val), "r" (one_val), "r" (pItem), "r" (pixeldata4)
                             : "a11");
@@ -557,14 +563,6 @@ void IRAM_ATTR ESP32RMTController::interruptHandler(void *arg)
             }
         }
     }
-
-    uint64_t end = __clock_cycles();
-    if (end > start)  // ignore any wrap-around samples
-    {
-        fastLEDfillDuration += end - start;
-        fastLEDlastFillDuration = end;
-        fastLEDnumFills++;
-    }
 }
 
 // -- Fill RMT buffer
@@ -572,67 +570,8 @@ void IRAM_ATTR ESP32RMTController::interruptHandler(void *arg)
 //    Each data bit is represented by a 32-bit RMT item that specifies how
 //    long to hold the signal high, followed by how long to hold it low.
 
-#if 0
 void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
 {
-    uint64_t start = __clock_cycles();
-    mLastFill = start;
-
-    // -- Get the zero and one values into local variables
-    register uint32_t one_val = mOne.val;
-    register uint32_t zero_val = mZero.val;
-
-    // -- Use locals for speed
-    volatile register uint32_t * pItem =  mRMT_mem_ptr;
-
-    for (register int i = 0; i < PULSES_PER_FILL/8; i++) {
-        if (mCur < mSize) {
-
-            // -- Get the next four bytes of pixel data
-            register uint32_t pixeldata = mPixelData[mCur] << 24;
-            mCur++;
-
-            // Shift bits out, MSB first, setting RMTMEM.chan[n].data32[x] to the
-            // rmt_item32_t value corresponding to the buffered bit value
-            for (register uint32_t j = 0; j < 8; j++) {
-                *pItem++ = (pixeldata & 0x80000000L) ? one_val : zero_val;
-                // Replaces: RMTMEM.chan[mRMT_channel].data32[mCurPulse].val = val;
-
-                pixeldata <<= 1;
-            }
-        } else {
-            // -- No more data; signal to the RMT we are done by filling the
-            //    rest of the buffer with zeros
-            *pItem++ = 0;
-        }
-    }
-
-    // -- Flip to the other half, resetting the pointer if necessary
-    mWhichHalf++;
-    if (mWhichHalf == 2) {
-        pItem = mRMT_mem_start;
-        mWhichHalf = 0;
-    }
-
-    // -- Store the new pointer back into the object
-    mRMT_mem_ptr = pItem;
-
-    /*
-      uint64_t end = __clock_cycles();
-      if (end > start)  // ignore any wrap-around samples
-      {
-      fastLEDfillDuration += end - start;
-      fastLEDlastFill = end;
-      fastLEDnumFills++;
-      }
-    */
-}
-
-#else
-void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
-{
-    // uint64_t start = xthal_get_ccount();  // __clock_cycles();
-
     // -- Get the zero and one values into local variables
     register uint32_t one_val = mOne.val;
     register uint32_t zero_val = mZero.val;
@@ -649,591 +588,175 @@ void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
         // -- Get the next four bytes of pixel data
         register uint32_t pixeldata4 = *((uint32_t*) curPtr);
         curPtr+=4;
+        // This code is exactly as described above in the interrupt handler
         asm(
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 96\n"          // store a1 contents into *(pItem+0)
+            "movgez a11, %0, %3\n"         // if the high bit is zero load the zero_val into reg
+            "movltz a11, %1, %3\n"         // if its 1 load one_val instead
+            "s32i   a11, %2, 96\n"         // store a11 into *(pItem+offset).  Offset is wierd because little endian
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 100\n"          // store a1 contents into *(pItem+0)
-                                
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 104\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"           // Shift next bit into bit 31 (sign bit)
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 100\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 108\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"           // Repeat 30 more times...
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 104\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 112\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 108\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 116\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 112\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 120\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 116\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 124\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 120\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 64\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 124\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 68\n"          // store a1 contents into *(pItem+0)
+            // Second byte
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 64\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 72\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 68\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 76\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 72\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 80\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 76\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 84\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 80\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 88\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 84\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 92\n"          // store a1 contents into *(pItem+0)
-                
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 88\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 32\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 92\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 36\n"          // store a1 contents into *(pItem+0)
+            // Byte 2
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 32\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 40\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 36\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 44\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 40\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 48\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 44\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 52\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 48\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 56\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 52\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 60\n"          // store a1 contents into *(pItem+0)
-                
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 0\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 56\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 4\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 60\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 8\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 0\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 12\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 4\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 16\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 8\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 20\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 12\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 24\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 16\n"
 
-            "slli   %3, %3, 1\n"           // Shift it to the top
-            "movgez a11, %0, %3\n"         // if its zero load the zero_val into a1
-            "movltz a11, %1, %3\n"         // if its 1 load the one_val into a1
-            "s32i   a11, %2, 28\n"          // store a1 contents into *(pItem+0)
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 20\n"
+
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 24\n"
+
+            "slli   %3, %3, 1\n"
+            "movgez a11, %0, %3\n"
+            "movltz a11, %1, %3\n"
+            "s32i   a11, %2, 28\n"
             :
             : "r" (zero_val), "r" (one_val), "r" (pItem), "r" (pixeldata4)
             : "a11");
 
-            
-        /*
-          asm("movi a14, 1\n"                // Mask bit
-          "slli a14, a14, 7\n"           // Shift it to the top
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 0\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 4\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 8\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 12\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 16\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 20\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 24\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 28\n"          // store a1 contents into *(pItem+0)
-
-
-                
-          "slli a14, a14, 15\n"           // Shift to next bit (weird because little endian)
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 32\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 36\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 40\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 44\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 48\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 52\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 56\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 60\n"          // store a1 contents into *(pItem+0)
-
-
-
-
-          "slli a14, a14, 15\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 64\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 68\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 72\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 76\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 80\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 84\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 88\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 92\n"          // store a1 contents into *(pItem+0)
-
-
-          "slli a14, a14, 15\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 96\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 100\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 104\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 108\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 112\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 116\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 120\n"          // store a1 contents into *(pItem+0)
-
-          "srli a14, a14, 1\n"           // Shift to next bit
-          "and a12, %3, a14\n"            // mask top bit of pixeldata4
-          "moveqz a11, %0, a12\n"         // if its zero load the zero_val into a1
-          "movnez a11, %1, a12\n"         // if its 1 load the one_val into a1
-          "s32i   a11, %2, 124\n"          // store a1 contents into *(pItem+0)
-
-          :
-          : "r" (zero_val), "r" (one_val), "r" (pItem), "r" (pixeldata4)
-          : "a11","a12","a13","a14");
-        */
-
-        mCurPtr+=4;
         pItem+=32;
-#if 0
-        for (register int j=0;j<4;j++)
-        {
-            // Seem backwards?  ESP32 is little endian.
-            register uint32_t pixeldata = pixeldata4 & 255;
-            pixeldata4 >>= 8;
-
-            switch(pixeldata>>4)
-            {
-            default:
-            case 0:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 1:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 2:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 3:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 4:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 5:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 6:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 7:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 8:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 9:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 10:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 11:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 12:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 13:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 14:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 15:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            }
-
-            switch(pixeldata&0xf)
-                //switch(pixeldata&0xe)
-            {
-            default:
-            case 0:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 1:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 2:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 3:
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 4:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 5:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 6:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 7:
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 8:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 9:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 10:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 11:
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            case 12:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = zero_val;
-                break;
-            case 13:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                *pItem++ = one_val;
-                break;
-            case 14:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = zero_val;
-                break;
-            case 15:
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                *pItem++ = one_val;
-                break;
-            }
-        }
-#endif
-            
     }
+    mCurPtr= curPtr;
     if (end == mEndPtr) *pItem++ = 0;
 
     // -- Flip to the other half, resetting the pointer if necessary
@@ -1247,7 +770,7 @@ void IRAM_ATTR ESP32RMTController::fillNext(bool check_time)
     // -- Store the new pointer back into the object
     mRMT_mem_ptr = (volatile uint32_t*) pItem;
 }
-#endif
+
 
 // -- Init pulse buffer
 //    Set up the buffer that will hold all of the pulse items for this
